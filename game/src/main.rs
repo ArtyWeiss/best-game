@@ -1,13 +1,12 @@
-use platform::window;
+use platform::window::{self, Window};
 
 fn main() {
     println!("Start");
-    let mut window = window::create("Best-Game", 100, 100);
-    loop {
-        window::update(&mut window);
-        if window.exit {
-            break;
-        }
+    let mut window = Window::default();
+    window.width = 100;
+    window.height = 100;
+    while !window.exit {
+        window::update_window(&mut window);
     }
     println!("Finish");
 }
