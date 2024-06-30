@@ -2,6 +2,7 @@ use std::{
     ffi::CString,
     time::{Duration, Instant},
 };
+use renderer::Renderer;
 use windows_sys::{
     core::*,
     Win32::{
@@ -14,8 +15,14 @@ use windows_sys::{
 pub struct Window {
     pub width: u32,
     pub height: u32,
-    pub exit: bool,
-    pub(crate) internal: Box<WindowInternal>,
+    pub internal: WindowInternal,
+}
+
+pub struct Callbacks {
+    pub resize: fn(u32, u32),
+    pub close: fn(),
+    pub exit: fn(),
+    pub repaint: fn(),
 }
 
 #[derive(Debug, Default)]
@@ -23,40 +30,28 @@ pub struct WindowInternal {
     pub initialized: bool,
     pub hinstance: HINSTANCE,
     pub hwnd: HWND,
-    pub events: Vec<WindowEvent>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum WindowEvent {
-    Resize,
-    Key,
-    Mouse,
-    Exit,
-}
-
-pub fn update_window(window: &mut Window) {
-    window.internal.events.clear();
-
+pub fn update_window(window: &mut Window, callbacks: &mut Callbacks) {
     if !window.internal.initialized {
         create_window(
             "Best Game",
             window.width,
             window.height,
-            window.internal.as_mut(),
+            &mut window.internal,
+            callbacks,
         );
     }
-    get_events_with_timeout(window.internal.as_mut(), 10);
-
-    if !window.internal.events.is_empty() {
-        println!("Events:\n{:#?}", window.internal.events);
-    }
-
-    if window.internal.events.contains(&WindowEvent::Exit) {
-        window.exit = true;
-    }
+    get_events_with_timeout(&mut window.internal, 10);
 }
 
-fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInternal) {
+fn create_window(
+    name: &str,
+    width: u32,
+    height: u32,
+    internal: &mut WindowInternal,
+    callbacks: &mut Callbacks,
+) {
     println!("Create {:?}", name);
     unsafe {
         internal.hinstance = GetModuleHandleW(std::ptr::null());
@@ -90,7 +85,7 @@ fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInter
             0,
             0,
             internal.hinstance,
-            std::ptr::from_mut(internal) as *const std::ffi::c_void,
+            std::ptr::from_mut(callbacks) as *const std::ffi::c_void,
         );
 
         internal.initialized = true;
@@ -103,6 +98,7 @@ fn get_events_with_timeout(internal: &mut WindowInternal, timeout_ms: u64) {
         let start = Instant::now();
         while PeekMessageW(&mut message, internal.hwnd, 0, 0, PM_REMOVE) > 0 {
             println!("Get msg: elapsed {:?}", start.elapsed());
+            TranslateMessage(&message);
             DispatchMessageW(&message);
             if start.elapsed() > Duration::from_millis(timeout_ms) {
                 return;
@@ -114,27 +110,31 @@ fn get_events_with_timeout(internal: &mut WindowInternal, timeout_ms: u64) {
 extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let mut result = -1;
-        let internal_ptr = if message == WM_CREATE {
+        let callbacks_ptr = if message == WM_CREATE {
             let create_ptr = lparam as *const CREATESTRUCTW;
-            let internal_ptr = (*create_ptr).lpCreateParams as *mut WindowInternal;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, internal_ptr as _);
-            internal_ptr
+            let callbacks_ptr = (*create_ptr).lpCreateParams as *mut Callbacks;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, callbacks_ptr as _);
+            callbacks_ptr
         } else {
-            GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowInternal
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Callbacks
         };
 
-        if let Some(internal) = internal_ptr.as_mut() {
+        if let Some(callbacks) = callbacks_ptr.as_mut() {
             match message {
-                WM_MOUSEMOVE => {
-                    internal.events.push(WindowEvent::Mouse);
-                    result = 0;
+                WM_SIZE => {
+                    (callbacks.resize)(100, 100)
                 }
                 WM_PAINT => {
+                    (callbacks.repaint)();
                     ValidateRect(hwnd, std::ptr::null());
                     result = 0;
                 }
+                WM_CLOSE => {
+                    (callbacks.close)();
+                    result = 0;
+                }
                 WM_DESTROY => {
-                    internal.events.push(WindowEvent::Exit);
+                    (callbacks.exit)();
                     PostQuitMessage(0);
                     result = 0;
                 }
