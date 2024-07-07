@@ -1,26 +1,38 @@
-use std::{
-    ffi::CString,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use windows_sys::{
     core::*,
-    Win32::{
-        Foundation::*, Graphics::Gdi::ValidateRect, System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::*,
-    },
+    Win32::{Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::WindowsAndMessaging::*},
 };
 
-#[derive(Default)]
+use crate::keycodes::{to_keycode, KeyCode};
+
 pub struct Window {
+    pub title: String,
     pub width: u32,
     pub height: u32,
-    pub exit: bool,
+    pub events: Vec<WindowEvent>,
+    pub exists: bool,
     pub(crate) internal: Box<WindowInternal>,
 }
 
+impl Window {
+    pub fn new(title: String, width: u32, height: u32) -> Self {
+        Self {
+            title,
+            width,
+            height,
+            events: vec![],
+            exists: true,
+            internal: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-pub struct WindowInternal {
+pub(crate) struct WindowInternal {
     pub initialized: bool,
+    pub destroyed: bool,
+
     pub hinstance: HINSTANCE,
     pub hwnd: HWND,
     pub events: Vec<WindowEvent>,
@@ -28,31 +40,41 @@ pub struct WindowInternal {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WindowEvent {
-    Resize,
-    Key,
-    Mouse,
-    Exit,
+    Mouse { event: MouseEvent },
+    Key { pressed: bool, key: KeyCode },
+    Resize { width: u32, height: u32 },
+    Close,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MouseEvent {
+    Move { x: i16, y: i16 },
+    Button { pressed: bool, button: MouseButton },
+    Wheel,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
 }
 
 pub fn update_window(window: &mut Window) {
-    window.internal.events.clear();
-
     if !window.internal.initialized {
         create_window(
-            "Best Game",
+            &window.title,
             window.width,
             window.height,
             window.internal.as_mut(),
         );
+        window.exists = true;
     }
     get_events_with_timeout(window.internal.as_mut(), 10);
+    window.events = window.internal.events.drain(..).collect();
 
-    if !window.internal.events.is_empty() {
-        println!("Events:\n{:#?}", window.internal.events);
-    }
-
-    if window.internal.events.contains(&WindowEvent::Exit) {
-        window.exit = true;
+    if window.internal.destroyed {
+        window.exists = false;
     }
 }
 
@@ -77,11 +99,13 @@ fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInter
         let registered = RegisterClassW(&window_class);
         debug_assert_ne!(registered, 0);
 
-        let instance_name = CString::new(name).unwrap();
+        let mut instance_name: Vec<u16> = name.encode_utf16().collect();
+        instance_name.push(0);
+
         internal.hwnd = CreateWindowExW(
             0,
             class_name,
-            instance_name.as_ptr() as *const _,
+            instance_name.as_ptr(),
             WS_VISIBLE | WS_OVERLAPPEDWINDOW,
             0,
             0,
@@ -102,7 +126,7 @@ fn get_events_with_timeout(internal: &mut WindowInternal, timeout_ms: u64) {
         let mut message: MSG = std::mem::zeroed();
         let start = Instant::now();
         while PeekMessageW(&mut message, internal.hwnd, 0, 0, PM_REMOVE) > 0 {
-            println!("Get msg: elapsed {:?}", start.elapsed());
+            TranslateMessage(&message);
             DispatchMessageW(&message);
             if start.elapsed() > Duration::from_millis(timeout_ms) {
                 return;
@@ -125,16 +149,79 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
 
         if let Some(internal) = internal_ptr.as_mut() {
             match message {
+                WM_SIZE => {
+                    internal.events.push(WindowEvent::Resize {
+                        width: get_loword(lparam as _) as u32,
+                        height: get_hiword(lparam as _) as u32,
+                    });
+                }
+                WM_KEYDOWN => {
+                    internal.events.push(WindowEvent::Key {
+                        pressed: true,
+                        key: to_keycode(wparam as u32),
+                    });
+                }
+                WM_KEYUP => {
+                    internal.events.push(WindowEvent::Key {
+                        pressed: false,
+                        key: to_keycode(wparam as u32),
+                    });
+                }
+                WM_LBUTTONDOWN => {
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Button {
+                            pressed: true,
+                            button: MouseButton::Left,
+                        },
+                    });
+                }
+                WM_LBUTTONUP => {
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Button {
+                            pressed: false,
+                            button: MouseButton::Left,
+                        },
+                    });
+                }
+                WM_RBUTTONDOWN => {
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Button {
+                            pressed: true,
+                            button: MouseButton::Right,
+                        },
+                    });
+                }
+                WM_RBUTTONUP => {
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Button {
+                            pressed: false,
+                            button: MouseButton::Right,
+                        },
+                    });
+                }
                 WM_MOUSEMOVE => {
-                    internal.events.push(WindowEvent::Mouse);
+                    let x = get_x_lparam(lparam as _);
+                    let y = get_y_lparam(lparam as _);
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Move { x, y },
+                    });
                     result = 0;
                 }
-                WM_PAINT => {
-                    ValidateRect(hwnd, std::ptr::null());
+                WM_MOUSEWHEEL => {
+                    internal.events.push(WindowEvent::Mouse {
+                        event: MouseEvent::Wheel,
+                    });
+                    result = 0;
+                }
+                // todo: разобраться, что писать в QuitMessage
+                WM_CLOSE => {
+                    internal.events.push(WindowEvent::Close);
+                    internal.destroyed = true;
+                    PostQuitMessage(0);
                     result = 0;
                 }
                 WM_DESTROY => {
-                    internal.events.push(WindowEvent::Exit);
+                    internal.destroyed = true;
                     PostQuitMessage(0);
                     result = 0;
                 }
@@ -148,4 +235,20 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
     }
+}
+
+fn get_loword(lparam: i32) -> u16 {
+    lparam as u16
+}
+
+fn get_hiword(lparam: i32) -> u16 {
+    (lparam >> 16) as u16
+}
+
+fn get_x_lparam(lparam: i32) -> i16 {
+    lparam as i16
+}
+
+fn get_y_lparam(lparam: i32) -> i16 {
+    (lparam >> 16) as i16
 }

@@ -1,12 +1,11 @@
 use platform::window::{self, Window};
 
 fn main() {
-    println!("Start");
-    let mut window = Window::default();
-    window.width = 100;
-    window.height = 100;
-    while !window.exit {
+    let mut window = Window::new("Best Game".to_string(), 400, 400);
+    while window.exists {
         window::update_window(&mut window);
+        if !window.events.is_empty() {
+            println!("{:#?}", window.events);
+        }
     }
-    println!("Finish");
 }
