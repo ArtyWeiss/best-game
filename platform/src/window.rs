@@ -1,10 +1,19 @@
 use std::time::{Duration, Instant};
-use windows_sys::{
-    core::*,
-    Win32::{Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::WindowsAndMessaging::*},
+use windows_sys::Win32::{
+    Foundation::*,
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetKeyboardLayout, MapVirtualKeyExW, MAPVK_VK_TO_VSC_EX, VIRTUAL_KEY,
+        },
+        WindowsAndMessaging::*,
+    },
 };
 
-use crate::keycodes::{to_keycode, KeyCode};
+use crate::{
+    keycodes::{scancode_to_key, KeyCode},
+    utils,
+};
 
 pub struct Window {
     pub title: String,
@@ -48,7 +57,7 @@ pub enum WindowEvent {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MouseEvent {
-    Move { x: i16, y: i16 },
+    Move { x: i32, y: i32 },
     Button { pressed: bool, button: MouseButton },
     Wheel,
 }
@@ -83,32 +92,18 @@ fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInter
     unsafe {
         internal.hinstance = GetModuleHandleW(std::ptr::null());
 
-        let class_name = w!("BestGameWindow");
-        let window_class = WNDCLASSW {
-            style: CS_VREDRAW | CS_HREDRAW,
-            lpfnWndProc: Some(wndproc),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: internal.hinstance,
-            hIcon: 0,
-            hCursor: 0,
-            hbrBackground: 0,
-            lpszMenuName: std::ptr::null(),
-            lpszClassName: class_name,
-        };
-        let registered = RegisterClassW(&window_class);
-        debug_assert_ne!(registered, 0);
+        let title = utils::encode_wide(name);
+        let class_name = utils::encode_wide("BestGameWindow");
 
-        let mut instance_name: Vec<u16> = name.encode_utf16().collect();
-        instance_name.push(0);
+        register_window_class(internal.hinstance, &class_name);
 
         internal.hwnd = CreateWindowExW(
             0,
-            class_name,
-            instance_name.as_ptr(),
+            class_name.as_ptr(),
+            title.as_ptr(),
             WS_VISIBLE | WS_OVERLAPPEDWINDOW,
-            0,
-            0,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
             width as _,
             height as _,
             0,
@@ -116,7 +111,6 @@ fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInter
             internal.hinstance,
             std::ptr::from_mut(internal) as *const std::ffi::c_void,
         );
-
         internal.initialized = true;
     }
 }
@@ -147,6 +141,8 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
             GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowInternal
         };
 
+        let kb_layout = GetKeyboardLayout(0);
+
         if let Some(internal) = internal_ptr.as_mut() {
             match message {
                 WM_SIZE => {
@@ -156,15 +152,19 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
                     });
                 }
                 WM_KEYDOWN => {
+                    let v_key = wparam as VIRTUAL_KEY;
+                    let scancode = MapVirtualKeyExW(v_key as u32, MAPVK_VK_TO_VSC_EX, kb_layout);
                     internal.events.push(WindowEvent::Key {
                         pressed: true,
-                        key: to_keycode(wparam as u32),
+                        key: scancode_to_key(scancode),
                     });
                 }
                 WM_KEYUP => {
+                    let v_key = wparam as VIRTUAL_KEY;
+                    let scancode = MapVirtualKeyExW(v_key as u32, MAPVK_VK_TO_VSC_EX, kb_layout);
                     internal.events.push(WindowEvent::Key {
                         pressed: false,
-                        key: to_keycode(wparam as u32),
+                        key: scancode_to_key(scancode),
                     });
                 }
                 WM_LBUTTONDOWN => {
@@ -213,7 +213,6 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
                     });
                     result = 0;
                 }
-                // todo: разобраться, что писать в QuitMessage
                 WM_CLOSE => {
                     internal.events.push(WindowEvent::Close);
                     internal.destroyed = true;
@@ -237,18 +236,37 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
     }
 }
 
-fn get_loword(lparam: i32) -> u16 {
-    lparam as u16
+unsafe fn register_window_class(hinstance: HINSTANCE, class_name: &[u16]) {
+    let class = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinstance,
+        hIcon: 0,
+        hCursor: 0,
+        hbrBackground: 0,
+        lpszMenuName: std::ptr::null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: 0,
+    };
+    let registered = RegisterClassExW(&class);
+    debug_assert_ne!(registered, 0);
 }
 
-fn get_hiword(lparam: i32) -> u16 {
-    (lparam >> 16) as u16
+fn get_loword(lparam: u32) -> u32 {
+    lparam & 0xffff
 }
 
-fn get_x_lparam(lparam: i32) -> i16 {
-    lparam as i16
+fn get_hiword(lparam: u32) -> u32 {
+    (lparam >> 16) & 0xffff
 }
 
-fn get_y_lparam(lparam: i32) -> i16 {
-    (lparam >> 16) as i16
+fn get_x_lparam(lparam: i32) -> i32 {
+    lparam & 0xffff
+}
+
+fn get_y_lparam(lparam: i32) -> i32 {
+    (lparam >> 16) & 0xffff
 }
