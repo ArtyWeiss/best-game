@@ -1,11 +1,15 @@
-use platform::window::{self, Window};
+use platform::{
+    vulkan::VulkanContext,
+    window::{self, Window},
+};
 
 fn main() {
     let mut window = Window::new("Best Game".to_string(), 400, 400);
+    let mut vulkan_context = VulkanContext::new(&window);
+
     while window.exists {
         window::update_window(&mut window);
-        if !window.events.is_empty() {
-            println!("{:#?}", window.events);
-        }
     }
+
+    vulkan_context.destroy();
 }

@@ -35,6 +35,13 @@ impl Window {
             internal: Default::default(),
         }
     }
+
+    pub fn hwnd(&self) -> HWND {
+        self.internal.hwnd
+    }
+    pub fn hinstance(&self) -> HINSTANCE {
+        self.internal.hinstance
+    }
 }
 
 #[derive(Debug, Default)]
