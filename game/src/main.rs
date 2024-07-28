@@ -11,5 +11,6 @@ fn main() {
         window::update_window(&mut window);
         vulkan::update_context(&mut vulkan_context, &window);
         vulkan::update_pass(&mut vulkan_context);
+        vulkan::draw_frame(&mut vulkan_context);
     }
 }

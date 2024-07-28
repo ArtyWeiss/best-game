@@ -98,8 +98,8 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .expect("Acquire image failed")
         };
 
-        let fences = [internal.reuse_fence];
         unsafe {
+            let fences = [internal.reuse_fence];
             internal
                 .device
                 .wait_for_fences(&fences, true, u64::MAX)
@@ -146,15 +146,15 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .expect("End command buffer failed");
 
             let command_buffers = [internal.command_buffer];
-            let wait_semaphores = [internal.rendering_complete_semaphore];
-            let signal_semaphores = [internal.presentation_complete_semaphore];
+            let wait_semaphores = [internal.presentation_complete_semaphore];
+            let signal_semaphores = [internal.rendering_complete_semaphore];
             let wait_dst_stage_mask = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
             let submit_info = vk::SubmitInfo::default()
                 .command_buffers(&command_buffers)
-                .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_dst_stage_mask)
+                .wait_semaphores(&wait_semaphores)
                 .signal_semaphores(&signal_semaphores);
-
             internal
                 .device
                 .queue_submit(internal.present_queue, &[submit_info], internal.reuse_fence)
@@ -290,7 +290,7 @@ fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
             .expect("Cant allocate command buffer")[0]
     };
 
-    let create_info = vk::FenceCreateInfo::default();
+    let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
     let reuse_fence = unsafe {
         device
             .create_fence(&create_info, None)
