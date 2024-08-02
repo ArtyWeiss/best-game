@@ -1,3 +1,4 @@
+use crate::utils;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::{
     Foundation::*,
@@ -10,10 +11,9 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{
-    keycodes::{scancode_to_key, KeyCode},
-    utils,
-};
+use keycodes::scancode_to_key;
+pub use keycodes::KeyCode;
+mod keycodes;
 
 pub struct Window {
     pub title: String,
@@ -76,6 +76,7 @@ pub enum MouseButton {
     Middle,
 }
 
+// PUBLIC FUNCTIONS =============================================================================
 pub fn update_window(window: &mut Window) {
     if !window.internal.initialized {
         create_window(
@@ -94,8 +95,9 @@ pub fn update_window(window: &mut Window) {
     }
 }
 
+// PRIVATE FUNCTIONS ===========================================================================
 fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInternal) {
-    println!("Create {:?}", name);
+    utils::trace(format!("Create {:?}", name));
     unsafe {
         internal.hinstance = GetModuleHandleW(std::ptr::null());
 

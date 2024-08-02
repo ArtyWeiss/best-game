@@ -1,4 +1,3 @@
-pub mod window;
+pub mod utils;
 pub mod vulkan;
-mod keycodes;
-mod utils;
+pub mod window;

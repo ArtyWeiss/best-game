@@ -7,6 +7,7 @@ use ash::khr::swapchain;
 use ash::vk;
 use ash::vk::Extent2D;
 
+use crate::utils;
 use crate::window::Window;
 
 pub struct VulkanContext {
@@ -68,7 +69,7 @@ pub fn update_context(context: &mut VulkanContext, window: &Window) {
         if window.internal.initialized {
             match create_context(window) {
                 Ok(internal) => context.internal = Some(internal),
-                Err(e) => println!("{:?}", e),
+                Err(e) => utils::error(format!("{:?}", e)),
             }
         }
     } else if window.internal.destroyed {
@@ -194,7 +195,10 @@ fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
         unsafe { pick_physical_device(&instance, &surface_loader, surface) };
     let properties = unsafe { instance.get_physical_device_properties(physical_device) };
 
-    println!("Picked device: {:?}", properties.device_name_as_c_str());
+    utils::trace(format!(
+        "Picked device: {:?}",
+        properties.device_name_as_c_str()
+    ));
 
     let priorities = [1.0];
     let queue_create_infos = [vk::DeviceQueueCreateInfo::default()
@@ -491,11 +495,6 @@ fn get_required_extensions() -> &'static [*const c_char] {
 }
 
 fn create_surface(entry: &ash::Entry, instance: &ash::Instance, window: &Window) -> vk::SurfaceKHR {
-    println!(
-        "HWND: {:?} HINSTANCE: {:?}",
-        window.hwnd(),
-        window.hinstance()
-    );
     let create_info = vk::Win32SurfaceCreateInfoKHR::default()
         .hwnd(window.hwnd())
         .hinstance(window.hinstance());
