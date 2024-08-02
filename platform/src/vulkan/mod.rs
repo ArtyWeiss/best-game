@@ -1,6 +1,9 @@
+use std::borrow::Cow;
 use std::ffi::c_char;
+use std::ffi::CStr;
 use std::ffi::CString;
 
+use ash::ext::debug_utils;
 use ash::khr;
 use ash::khr::surface;
 use ash::khr::swapchain;
@@ -10,9 +13,13 @@ use ash::vk::Extent2D;
 use crate::utils;
 use crate::window::Window;
 
+use constants::VALIDATION_NAME;
+mod constants;
+
 pub struct VulkanContext {
     pub width: u32,
     pub height: u32,
+    pub validation: bool,
     pub(crate) internal: Option<InternalContext>,
     pub(crate) pass: Option<Pass>,
 }
@@ -40,6 +47,9 @@ pub(crate) struct InternalContext {
     swapchain_image_views: Vec<vk::ImageView>,
     rendering_complete_semaphore: vk::Semaphore,
     presentation_complete_semaphore: vk::Semaphore,
+
+    debug_utils_loader: debug_utils::Instance,
+    debug_messenger: vk::DebugUtilsMessengerEXT,
 }
 
 pub(crate) struct Pass {
@@ -51,13 +61,15 @@ pub(crate) struct Pass {
 #[derive(Debug, Clone, Copy)]
 pub enum VulkanError {
     WindowNotInitialized,
+    ValidationNotPresent,
 }
 
 impl VulkanContext {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, validation: bool) -> Self {
         Self {
             width,
             height,
+            validation,
             internal: None,
             pass: None,
         }
@@ -67,7 +79,7 @@ impl VulkanContext {
 pub fn update_context(context: &mut VulkanContext, window: &Window) {
     if context.internal.is_none() {
         if window.internal.initialized {
-            match create_context(window) {
+            match create_context(window, context.validation) {
                 Ok(internal) => context.internal = Some(internal),
                 Err(e) => utils::error(format!("{:?}", e)),
             }
@@ -87,8 +99,18 @@ pub fn update_pass(context: &mut VulkanContext) {
 
 pub fn draw_frame(context: &mut VulkanContext) {
     if let (Some(internal), Some(pass)) = (context.internal.as_mut(), context.pass.as_mut()) {
-        let (present_index, _) = unsafe {
+        // START FRAME
+        let present_index = unsafe {
             internal
+                .device
+                .wait_for_fences(&[internal.reuse_fence], true, u64::MAX)
+                .expect("Wait failed");
+            internal
+                .device
+                .reset_fences(&[internal.reuse_fence])
+                .expect("Reset failed");
+
+            let (present_index, _) = internal
                 .swapchain_loader
                 .acquire_next_image(
                     internal.swapchain,
@@ -96,16 +118,8 @@ pub fn draw_frame(context: &mut VulkanContext) {
                     internal.presentation_complete_semaphore,
                     vk::Fence::null(),
                 )
-                .expect("Acquire image failed")
-        };
+                .expect("Acquire image failed");
 
-        unsafe {
-            let fences = [internal.reuse_fence];
-            internal
-                .device
-                .wait_for_fences(&fences, true, u64::MAX)
-                .expect("Wait failed");
-            internal.device.reset_fences(&fences).expect("Reset failed");
             internal
                 .device
                 .reset_command_buffer(
@@ -119,9 +133,9 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .device
                 .begin_command_buffer(internal.command_buffer, &begin_info)
                 .expect("Command buffer begin failed");
-        };
 
-        // ACTUAL RENDERING CODE HERE
+            present_index
+        };
 
         unsafe {
             let clear_values = [pass.clear_value];
@@ -138,8 +152,7 @@ pub fn draw_frame(context: &mut VulkanContext) {
             internal.device.cmd_end_render_pass(internal.command_buffer);
         }
 
-        // ACTUAL RENDERING CODE HERE
-
+        // FINISH FRAME
         unsafe {
             internal
                 .device
@@ -160,15 +173,55 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .device
                 .queue_submit(internal.present_queue, &[submit_info], internal.reuse_fence)
                 .expect("Submit failed");
-        }
+
+            let wait_semaphores = [internal.rendering_complete_semaphore];
+            let swapchains = [internal.swapchain];
+            let image_indices = [present_index];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&wait_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+            internal
+                .swapchain_loader
+                .queue_present(internal.present_queue, &present_info)
+                .expect("Present error");
+        };
+
+        //
+        //        // ACTUAL RENDERING CODE HERE
+        //
+        //        unsafe {
+        //            let clear_values = [pass.clear_value];
+        //            let begin_info = vk::RenderPassBeginInfo::default()
+        //                .render_pass(pass.raw)
+        //                .clear_values(&clear_values)
+        //                .render_area(internal.surface_resolution.into())
+        //                .framebuffer(pass.framebuffers[present_index as usize]);
+        //            internal.device.cmd_begin_render_pass(
+        //                internal.command_buffer,
+        //                &begin_info,
+        //                vk::SubpassContents::INLINE,
+        //            );
+        //            internal.device.cmd_end_render_pass(internal.command_buffer);
+        //        }
+        //
+        //        // ACTUAL RENDERING CODE HERE
+        //
     }
 }
 
-fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
+fn create_context(window: &Window, validation: bool) -> Result<InternalContext, VulkanError> {
     if window.hwnd() == 0 || window.hinstance() == 0 {
         return Err(VulkanError::WindowNotInitialized);
     }
     let entry = unsafe { ash::Entry::load().expect("Vulkan not supported") };
+
+    let validation_support = get_validation_support(&entry);
+    if !validation_support && validation {
+        utils::error("Validation requested but not present");
+        return Err(VulkanError::ValidationNotPresent);
+    }
+
     let instance = unsafe {
         let engine_name = CString::new("Best Engine").unwrap();
         let app_info = vk::ApplicationInfo::default()
@@ -176,19 +229,20 @@ fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
             .engine_name(&engine_name)
             .engine_version(1)
             .application_version(1);
-        let extensions = get_required_extensions();
-        //            let layers = get_layers();
+        let layers = get_layers(validation);
+        let extensions = get_required_extensions(validation);
 
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(extensions)
-            //                .enabled_layer_names(layers)
+            .enabled_extension_names(&extensions)
+            .enabled_layer_names(&layers)
             .flags(vk::InstanceCreateFlags::default());
 
         entry
             .create_instance(&create_info, None)
             .expect("Instance create error")
     };
+
     let surface = create_surface(&entry, &instance, window);
     let surface_loader = surface::Instance::new(&entry, &instance);
     let (physical_device, queue_family_index) =
@@ -347,6 +401,25 @@ fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
             .expect("Cant create semaphore")
     };
 
+    let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(vulkan_debug_callback));
+    let debug_utils_loader = debug_utils::Instance::new(&entry, &instance);
+    let debug_messenger = unsafe {
+        debug_utils_loader
+            .create_debug_utils_messenger(&create_info, None)
+            .expect("Debug callback error")
+    };
+
     Ok(InternalContext {
         entry,
         instance,
@@ -365,7 +438,55 @@ fn create_context(window: &Window) -> Result<InternalContext, VulkanError> {
         presentation_complete_semaphore,
         surface_format,
         surface_resolution: image_extent,
+        debug_utils_loader,
+        debug_messenger,
     })
+}
+
+fn get_validation_support(entry: &ash::Entry) -> bool {
+    let layer_properties = unsafe {
+        entry
+            .enumerate_instance_layer_properties()
+            .expect("Enumerate layer properties error")
+    };
+    layer_properties.iter().any(|l| {
+        if let Ok(name) = l.layer_name_as_c_str() {
+            name == VALIDATION_NAME
+        } else {
+            false
+        }
+    })
+}
+
+unsafe extern "system" fn vulkan_debug_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user_data: *mut std::os::raw::c_void,
+) -> vk::Bool32 {
+    let callback_data = *p_callback_data;
+    let message_id_number = callback_data.message_id_number;
+
+    let message_id_name = if callback_data.p_message_id_name.is_null() {
+        Cow::from("")
+    } else {
+        CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
+    };
+
+    let message = if callback_data.p_message.is_null() {
+        Cow::from("")
+    } else {
+        CStr::from_ptr(callback_data.p_message).to_string_lossy()
+    };
+
+    match message_severity {
+        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
+            utils::error(format!("{message_id_name} : {message}"))
+        }
+        _ => utils::trace(format!("{message_id_name} : {message}")),
+    }
+
+    vk::FALSE
 }
 
 fn create_pass(internal: &mut InternalContext) -> Pass {
@@ -447,6 +568,9 @@ impl Drop for InternalContext {
             }
             self.device.destroy_command_pool(self.command_pool, None);
 
+            self.debug_utils_loader
+                .destroy_debug_utils_messenger(self.debug_messenger, None);
+
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.device.destroy_device(None);
@@ -486,12 +610,24 @@ unsafe fn pick_physical_device(
         .expect("No suitable physical device")
 }
 
-fn get_required_extensions() -> &'static [*const c_char] {
-    const EXTESIONS: [*const c_char; 2] = [
+fn get_layers(validation: bool) -> Vec<*const c_char> {
+    if validation {
+        vec![VALIDATION_NAME.as_ptr()]
+    } else {
+        vec![]
+    }
+}
+
+fn get_required_extensions(validation: bool) -> Vec<*const c_char> {
+    let mut extensions = vec![
         khr::surface::NAME.as_ptr(),
         khr::win32_surface::NAME.as_ptr(),
     ];
-    &EXTESIONS
+    if validation {
+        extensions.push(debug_utils::NAME.as_ptr())
+    }
+
+    extensions
 }
 
 fn create_surface(entry: &ash::Entry, instance: &ash::Instance, window: &Window) -> vk::SurfaceKHR {
