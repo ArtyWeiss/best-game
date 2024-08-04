@@ -17,25 +17,41 @@ mod keycodes;
 
 pub struct Window {
     pub title: String,
-    pub width: u32,
-    pub height: u32,
+    pub outer_size: PhysicalSize,
+    pub inner_size: PhysicalSize,
     pub events: Vec<WindowEvent>,
     pub exists: bool,
     pub(crate) internal: Box<WindowInternal>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhysicalSize {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl PhysicalSize {
+    pub const fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
+    }
+    pub(crate) fn from_lparam(lparam: isize) -> Self {
+        let x = get_loword(lparam as _) as u32;
+        let y = get_hiword(lparam as _) as u32;
+        Self { x, y }
+    }
 }
 
 impl Window {
     pub fn new(title: String, width: u32, height: u32) -> Self {
         Self {
             title,
-            width,
-            height,
+            outer_size: PhysicalSize::new(width, height),
+            inner_size: PhysicalSize::new(width, height),
             events: vec![],
             exists: true,
             internal: Default::default(),
         }
     }
-
     pub fn hwnd(&self) -> HWND {
         self.internal.hwnd
     }
@@ -48,6 +64,8 @@ impl Window {
 pub(crate) struct WindowInternal {
     pub initialized: bool,
     pub destroyed: bool,
+    pub outer_size: PhysicalSize,
+    pub inner_size: PhysicalSize,
 
     pub hinstance: HINSTANCE,
     pub hwnd: HWND,
@@ -58,7 +76,7 @@ pub(crate) struct WindowInternal {
 pub enum WindowEvent {
     Mouse { event: MouseEvent },
     Key { pressed: bool, key: KeyCode },
-    Resize { width: u32, height: u32 },
+    Resize,
     Close,
 }
 
@@ -79,16 +97,13 @@ pub enum MouseButton {
 // PUBLIC FUNCTIONS =============================================================================
 pub fn update_window(window: &mut Window) {
     if !window.internal.initialized {
-        create_window(
-            &window.title,
-            window.width,
-            window.height,
-            window.internal.as_mut(),
-        );
+        create_window(&window.title, window.outer_size, window.internal.as_mut());
         window.exists = true;
     }
     get_events_with_timeout(window.internal.as_mut(), 10);
     window.events = window.internal.events.drain(..).collect();
+    window.inner_size = window.internal.inner_size;
+    window.outer_size = window.internal.outer_size;
 
     if window.internal.destroyed {
         window.exists = false;
@@ -96,7 +111,7 @@ pub fn update_window(window: &mut Window) {
 }
 
 // PRIVATE FUNCTIONS ===========================================================================
-fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInternal) {
+fn create_window(name: &str, size: PhysicalSize, internal: &mut WindowInternal) {
     utils::trace(format!("Create {:?}", name));
     unsafe {
         internal.hinstance = GetModuleHandleW(std::ptr::null());
@@ -113,8 +128,8 @@ fn create_window(name: &str, width: u32, height: u32, internal: &mut WindowInter
             WS_VISIBLE | WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            width as _,
-            height as _,
+            size.x as _,
+            size.y as _,
             0,
             0,
             internal.hinstance,
@@ -155,10 +170,23 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
         if let Some(internal) = internal_ptr.as_mut() {
             match message {
                 WM_SIZE => {
-                    internal.events.push(WindowEvent::Resize {
-                        width: get_loword(lparam as _) as u32,
-                        height: get_hiword(lparam as _) as u32,
-                    });
+                    let size = PhysicalSize::from_lparam(lparam);
+                    let mut rect: RECT = RECT {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    };
+                    let result = GetWindowRect(hwnd, &mut rect);
+                    assert_eq!(result, 1);
+                    let outer_size = PhysicalSize::new(
+                        (rect.right - rect.left) as u32,
+                        (rect.bottom - rect.top) as u32,
+                    );
+
+                    internal.inner_size = size;
+                    internal.outer_size = outer_size;
+                    internal.events.push(WindowEvent::Resize);
                 }
                 WM_KEYDOWN => {
                     let v_key = wparam as VIRTUAL_KEY;

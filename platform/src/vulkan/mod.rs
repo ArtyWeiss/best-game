@@ -12,6 +12,7 @@ use ash::vk::Extent2D;
 
 use crate::utils;
 use crate::window::Window;
+use crate::window::WindowEvent;
 
 use constants::VALIDATION_NAME;
 mod constants;
@@ -25,6 +26,8 @@ pub struct VulkanContext {
 }
 
 pub(crate) struct InternalContext {
+    out_of_date: bool,
+
     entry: ash::Entry,
     instance: ash::Instance,
 
@@ -32,6 +35,7 @@ pub(crate) struct InternalContext {
     surface_loader: surface::Instance,
     surface_format: vk::SurfaceFormatKHR,
     surface_resolution: vk::Extent2D,
+    present_mode: vk::PresentModeKHR,
 
     device: ash::Device,
     physical_device: vk::PhysicalDevice,
@@ -77,15 +81,22 @@ impl VulkanContext {
 }
 
 pub fn update_context(context: &mut VulkanContext, window: &Window) {
-    if context.internal.is_none() {
-        if window.internal.initialized {
-            match create_context(window, context.validation) {
-                Ok(internal) => context.internal = Some(internal),
-                Err(e) => utils::error(format!("{:?}", e)),
-            }
+    if let Some(internal) = context.internal.as_mut() {
+        if window.internal.destroyed {
+            context.internal = None;
+        } else if window.events.contains(&WindowEvent::Resize) {
+            resize_swapchain(
+                internal,
+                context.pass.as_mut(),
+                window.inner_size.x,
+                window.inner_size.y,
+            );
         }
-    } else if window.internal.destroyed {
-        context.internal = None;
+    } else if window.internal.initialized {
+        match create_context(window, context.validation) {
+            Ok(internal) => context.internal = Some(internal),
+            Err(e) => utils::error(format!("{:?}", e)),
+        }
     }
 }
 
@@ -100,6 +111,11 @@ pub fn update_pass(context: &mut VulkanContext) {
 pub fn draw_frame(context: &mut VulkanContext) {
     if let (Some(internal), Some(pass)) = (context.internal.as_mut(), context.pass.as_mut()) {
         // START FRAME
+        if internal.out_of_date {
+            utils::error("Swapchain outdated");
+            return;
+        }
+
         let present_index = unsafe {
             internal
                 .device
@@ -181,10 +197,14 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .wait_semaphores(&wait_semaphores)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            internal
+            match internal
                 .swapchain_loader
                 .queue_present(internal.present_queue, &present_info)
-                .expect("Present error");
+            {
+                Ok(_) => {}
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => internal.out_of_date = true,
+                Err(e) => panic!("{e}"),
+            }
         };
 
         //
@@ -265,6 +285,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
         .enabled_extension_names(&device_extensions)
         .enabled_features(&device_features)
         .queue_create_infos(&queue_create_infos);
+
     let device = unsafe {
         instance
             .create_device(physical_device, &create_info, None)
@@ -285,8 +306,8 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
     let desired_image_count = 3u32;
     let image_extent = if surface_capabilities.current_extent.width == u32::MAX {
         Extent2D {
-            width: window.width,
-            height: window.height,
+            width: window.inner_size.x,
+            height: window.inner_size.y,
         }
     } else {
         surface_capabilities.current_extent
@@ -361,33 +382,8 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
             .expect("No images")
     };
 
-    let swapchain_image_views: Vec<vk::ImageView> = present_images
-        .iter()
-        .map(|&image| {
-            let create_info = vk::ImageViewCreateInfo::default()
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::R,
-                    g: vk::ComponentSwizzle::G,
-                    b: vk::ComponentSwizzle::B,
-                    a: vk::ComponentSwizzle::A,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .image(image);
-            unsafe {
-                device
-                    .create_image_view(&create_info, None)
-                    .expect("Cant create image view")
-            }
-        })
-        .collect();
+    let swapchain_image_views =
+        create_swapchain_image_views(&device, &present_images, surface_format.format);
 
     let create_info = vk::SemaphoreCreateInfo::default();
     let rendering_complete_semaphore = unsafe {
@@ -421,6 +417,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
     };
 
     Ok(InternalContext {
+        out_of_date: false,
         entry,
         instance,
         surface,
@@ -438,9 +435,199 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
         presentation_complete_semaphore,
         surface_format,
         surface_resolution: image_extent,
+        present_mode,
         debug_utils_loader,
         debug_messenger,
     })
+}
+
+fn create_swapchain_image_views(
+    device: &ash::Device,
+    images: &[vk::Image],
+    format: vk::Format,
+) -> Vec<vk::ImageView> {
+    images
+        .iter()
+        .map(|&image| {
+            let create_info = vk::ImageViewCreateInfo::default()
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .components(vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::R,
+                    g: vk::ComponentSwizzle::G,
+                    b: vk::ComponentSwizzle::B,
+                    a: vk::ComponentSwizzle::A,
+                })
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image(image);
+            unsafe {
+                device
+                    .create_image_view(&create_info, None)
+                    .expect("Cant create image view")
+            }
+        })
+        .collect()
+}
+
+fn create_framebuffers(
+    device: &ash::Device,
+    swapchain_image_views: &[vk::ImageView],
+    pass: vk::RenderPass,
+    width: u32,
+    height: u32,
+) -> Vec<vk::Framebuffer> {
+    swapchain_image_views
+        .iter()
+        .map(|&image_view| {
+            let attachments = [image_view];
+            let create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(pass)
+                .attachments(&attachments)
+                .width(width)
+                .height(height)
+                .layers(1);
+
+            unsafe {
+                device
+                    .create_framebuffer(&create_info, None)
+                    .expect("Cant create framebuffer")
+            }
+        })
+        .collect()
+}
+
+fn resize_swapchain(
+    context: &mut InternalContext,
+    mut pass: Option<&mut Pass>,
+    width: u32,
+    height: u32,
+) {
+    unsafe {
+        context.device.device_wait_idle().expect("Wait idle error");
+    }
+
+    // CLEANUP
+    if let Some(pass) = pass.as_mut() {
+        for fb in pass.framebuffers.drain(..) {
+            unsafe { context.device.destroy_framebuffer(fb, None) };
+        }
+    }
+
+    let desired_image_count = context.swapchain_image_views.len() as u32;
+    for image_view in context.swapchain_image_views.drain(..) {
+        unsafe {
+            context.device.destroy_image_view(image_view, None);
+        }
+    }
+    unsafe {
+        context
+            .swapchain_loader
+            .destroy_swapchain(context.swapchain, None);
+    }
+
+    // CREATION
+    // TODO: Кидается ошибкой, если не вызывать get_surface_capabilites()
+    // Почему??
+    let surface_capabilities = unsafe {
+        context
+            .surface_loader
+            .get_physical_device_surface_capabilities(context.physical_device, context.surface)
+            .expect("Failed to get surface capabilities")
+    };
+    utils::trace(format!(
+        "Surface size {}x{}",
+        surface_capabilities.min_image_extent.width, surface_capabilities.min_image_extent.height
+    ));
+
+    context.surface_resolution = vk::Extent2D { width, height };
+    let create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(context.surface)
+        .min_image_count(desired_image_count)
+        .present_mode(context.present_mode)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_extent(context.surface_resolution)
+        .image_color_space(context.surface_format.color_space)
+        .image_format(context.surface_format.format)
+        .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .clipped(true)
+        .image_array_layers(1);
+    context.swapchain = unsafe {
+        context
+            .swapchain_loader
+            .create_swapchain(&create_info, None)
+            .expect("Swapchain create error")
+    };
+    let present_images = unsafe {
+        context
+            .swapchain_loader
+            .get_swapchain_images(context.swapchain)
+            .expect("Failed to get swapchain images")
+    };
+    context.swapchain_image_views = create_swapchain_image_views(
+        &context.device,
+        &present_images,
+        context.surface_format.format,
+    );
+
+    if let Some(pass) = pass.as_mut() {
+        pass.framebuffers = create_framebuffers(
+            &context.device,
+            &context.swapchain_image_views,
+            pass.raw,
+            context.surface_resolution.width,
+            context.surface_resolution.height,
+        );
+    }
+
+    utils::trace(format!(
+        "Resized to {}x{}",
+        context.surface_resolution.width, context.surface_resolution.height
+    ));
+}
+
+unsafe fn destroy_context(context: &mut InternalContext) {
+    context.device.device_wait_idle().expect("Wait idle error");
+    context
+        .device
+        .destroy_semaphore(context.rendering_complete_semaphore, None);
+    context
+        .device
+        .destroy_semaphore(context.presentation_complete_semaphore, None);
+    context.device.destroy_fence(context.reuse_fence, None);
+    for image_view in context.swapchain_image_views.iter() {
+        context.device.destroy_image_view(*image_view, None);
+    }
+    context
+        .device
+        .destroy_command_pool(context.command_pool, None);
+
+    context
+        .debug_utils_loader
+        .destroy_debug_utils_messenger(context.debug_messenger, None);
+
+    context
+        .swapchain_loader
+        .destroy_swapchain(context.swapchain, None);
+    context.device.destroy_device(None);
+    context
+        .surface_loader
+        .destroy_surface(context.surface, None);
+    context.instance.destroy_instance(None);
+}
+
+unsafe fn destroy_pass(context: &InternalContext, pass: &mut Pass) {
+    for fb in pass.framebuffers.iter() {
+        context.device.destroy_framebuffer(*fb, None);
+    }
+    context.device.destroy_render_pass(pass.raw, None);
 }
 
 fn get_validation_support(entry: &ash::Entry) -> bool {
@@ -458,6 +645,7 @@ fn get_validation_support(entry: &ash::Entry) -> bool {
     })
 }
 
+#[allow(unused)]
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -465,7 +653,6 @@ unsafe extern "system" fn vulkan_debug_callback(
     _user_data: *mut std::os::raw::c_void,
 ) -> vk::Bool32 {
     let callback_data = *p_callback_data;
-    let message_id_number = callback_data.message_id_number;
 
     let message_id_name = if callback_data.p_message_id_name.is_null() {
         Cow::from("")
@@ -525,57 +712,36 @@ fn create_pass(internal: &mut InternalContext) -> Pass {
             .expect("Cant create render pass")
     };
 
-    let framebuffers = internal
-        .swapchain_image_views
-        .iter()
-        .map(|&image_view| {
-            let attachments = [image_view];
-            let create_info = vk::FramebufferCreateInfo::default()
-                .render_pass(raw)
-                .attachments(&attachments)
-                .width(internal.surface_resolution.width)
-                .height(internal.surface_resolution.height)
-                .layers(1);
-
-            unsafe {
-                internal
-                    .device
-                    .create_framebuffer(&create_info, None)
-                    .expect("Cant create framebuffer")
-            }
-        })
-        .collect();
+    let framebuffers = create_framebuffers(
+        &internal.device,
+        &internal.swapchain_image_views,
+        raw,
+        internal.surface_resolution.width,
+        internal.surface_resolution.height,
+    );
 
     Pass {
         raw,
         clear_value: vk::ClearValue {
-            color: vk::ClearColorValue { float32: [0.5; 4] },
+            color: vk::ClearColorValue { float32: [0.0, 0.0, 1.0, 1.0] },
         },
         framebuffers,
     }
 }
 
-impl Drop for InternalContext {
+impl Drop for VulkanContext {
     fn drop(&mut self) {
-        unsafe {
-            self.device
-                .destroy_semaphore(self.rendering_complete_semaphore, None);
-            self.device
-                .destroy_semaphore(self.presentation_complete_semaphore, None);
-            self.device.destroy_fence(self.reuse_fence, None);
-            for image_view in self.swapchain_image_views.iter() {
-                self.device.destroy_image_view(*image_view, None);
-            }
-            self.device.destroy_command_pool(self.command_pool, None);
-
-            self.debug_utils_loader
-                .destroy_debug_utils_messenger(self.debug_messenger, None);
-
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
-            self.device.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
-            self.instance.destroy_instance(None);
+        match (self.internal.take(), self.pass.take()) {
+            (Some(mut internal), Some(mut pass)) => unsafe {
+                internal.device.device_wait_idle().expect("Wait idle error");
+                destroy_pass(&mut internal, &mut pass);
+                destroy_context(&mut internal);
+            },
+            (Some(mut internal), None) => unsafe {
+                internal.device.device_wait_idle().expect("Wait idle error");
+                destroy_context(&mut internal);
+            },
+            (_, _) => {}
         }
     }
 }
