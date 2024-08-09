@@ -1,14 +1,9 @@
 use std::borrow::Cow;
-use std::ffi::c_char;
-use std::ffi::CStr;
-use std::ffi::CString;
+use std::ffi::*;
 
 use ash::ext::debug_utils;
-use ash::khr;
-use ash::khr::surface;
-use ash::khr::swapchain;
+use ash::khr::*;
 use ash::vk;
-use ash::vk::Extent2D;
 
 use crate::utils;
 use crate::window::Window;
@@ -28,7 +23,7 @@ pub struct VulkanContext {
 pub(crate) struct InternalContext {
     out_of_date: bool,
 
-    entry: ash::Entry,
+    _entry: ash::Entry,
     instance: ash::Instance,
 
     surface: vk::SurfaceKHR,
@@ -56,6 +51,10 @@ pub(crate) struct InternalContext {
     debug_messenger: vk::DebugUtilsMessengerEXT,
 }
 
+pub(crate) struct PassConfiguration {
+    pub clear_color: [f32; 4],
+}
+
 pub(crate) struct Pass {
     raw: vk::RenderPass,
     clear_value: vk::ClearValue,
@@ -70,13 +69,7 @@ pub enum VulkanError {
 
 impl VulkanContext {
     pub fn new(width: u32, height: u32, validation: bool) -> Self {
-        Self {
-            width,
-            height,
-            validation,
-            internal: None,
-            pass: None,
-        }
+        Self { width, height, validation, internal: None, pass: None }
     }
 }
 
@@ -103,7 +96,10 @@ pub fn update_context(context: &mut VulkanContext, window: &Window) {
 pub fn update_pass(context: &mut VulkanContext) {
     if let Some(internal) = context.internal.as_mut() {
         if context.pass.is_none() {
-            context.pass = Some(create_pass(internal));
+            context.pass = Some(create_pass(
+                internal,
+                &PassConfiguration { clear_color: [0.3, 0.1, 0.2, 1.0] },
+            ));
         }
     }
 }
@@ -121,10 +117,7 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .device
                 .wait_for_fences(&[internal.reuse_fence], true, u64::MAX)
                 .expect("Wait failed");
-            internal
-                .device
-                .reset_fences(&[internal.reuse_fence])
-                .expect("Reset failed");
+            internal.device.reset_fences(&[internal.reuse_fence]).expect("Reset failed");
 
             let (present_index, _) = internal
                 .swapchain_loader
@@ -197,10 +190,7 @@ pub fn draw_frame(context: &mut VulkanContext) {
                 .wait_semaphores(&wait_semaphores)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            match internal
-                .swapchain_loader
-                .queue_present(internal.present_queue, &present_info)
-            {
+            match internal.swapchain_loader.queue_present(internal.present_queue, &present_info) {
                 Ok(_) => {}
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => internal.out_of_date = true,
                 Err(e) => panic!("{e}"),
@@ -258,9 +248,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
             .enabled_layer_names(&layers)
             .flags(vk::InstanceCreateFlags::default());
 
-        entry
-            .create_instance(&create_info, None)
-            .expect("Instance create error")
+        entry.create_instance(&create_info, None).expect("Instance create error")
     };
 
     let surface = create_surface(&entry, &instance, window);
@@ -271,7 +259,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
 
     utils::trace(format!(
         "Picked device: {:?}",
-        properties.device_name_as_c_str()
+        properties.device_name_as_c_str().unwrap_or_default()
     ));
 
     let priorities = [1.0];
@@ -279,7 +267,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
         .queue_family_index(queue_family_index)
         .queue_priorities(&priorities)];
 
-    let device_extensions = [khr::swapchain::NAME.as_ptr()];
+    let device_extensions = [swapchain::NAME.as_ptr()];
     let device_features = vk::PhysicalDeviceFeatures::default();
     let create_info = vk::DeviceCreateInfo::default()
         .enabled_extension_names(&device_extensions)
@@ -287,9 +275,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
         .queue_create_infos(&queue_create_infos);
 
     let device = unsafe {
-        instance
-            .create_device(physical_device, &create_info, None)
-            .expect("Device create error")
+        instance.create_device(physical_device, &create_info, None).expect("Device create error")
     };
     let present_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
@@ -305,10 +291,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
     };
     let desired_image_count = 3u32;
     let image_extent = if surface_capabilities.current_extent.width == u32::MAX {
-        Extent2D {
-            width: window.inner_size.x,
-            height: window.inner_size.y,
-        }
+        vk::Extent2D { width: window.inner_size.x, height: window.inner_size.y }
     } else {
         surface_capabilities.current_extent
     };
@@ -347,55 +330,36 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
 
     let swapchain_loader = swapchain::Device::new(&instance, &device);
     let swapchain = unsafe {
-        swapchain_loader
-            .create_swapchain(&create_info, None)
-            .expect("Swapchain create error")
+        swapchain_loader.create_swapchain(&create_info, None).expect("Swapchain create error")
     };
 
     let create_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
         .queue_family_index(queue_family_index);
     let command_pool = unsafe {
-        device
-            .create_command_pool(&create_info, None)
-            .expect("Create command pool failed")
+        device.create_command_pool(&create_info, None).expect("Create command pool failed")
     };
-    let allocate_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .command_buffer_count(1);
+    let allocate_info =
+        vk::CommandBufferAllocateInfo::default().command_pool(command_pool).command_buffer_count(1);
     let command_buffer = unsafe {
-        device
-            .allocate_command_buffers(&allocate_info)
-            .expect("Cant allocate command buffer")[0]
+        device.allocate_command_buffers(&allocate_info).expect("Cant allocate command buffer")[0]
     };
 
     let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-    let reuse_fence = unsafe {
-        device
-            .create_fence(&create_info, None)
-            .expect("Failed to create fence")
-    };
+    let reuse_fence =
+        unsafe { device.create_fence(&create_info, None).expect("Failed to create fence") };
 
-    let present_images = unsafe {
-        swapchain_loader
-            .get_swapchain_images(swapchain)
-            .expect("No images")
-    };
+    let present_images =
+        unsafe { swapchain_loader.get_swapchain_images(swapchain).expect("No images") };
 
     let swapchain_image_views =
         create_swapchain_image_views(&device, &present_images, surface_format.format);
 
     let create_info = vk::SemaphoreCreateInfo::default();
-    let rendering_complete_semaphore = unsafe {
-        device
-            .create_semaphore(&create_info, None)
-            .expect("Cant create semaphore")
-    };
-    let presentation_complete_semaphore = unsafe {
-        device
-            .create_semaphore(&create_info, None)
-            .expect("Cant create semaphore")
-    };
+    let rendering_complete_semaphore =
+        unsafe { device.create_semaphore(&create_info, None).expect("Cant create semaphore") };
+    let presentation_complete_semaphore =
+        unsafe { device.create_semaphore(&create_info, None).expect("Cant create semaphore") };
 
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
         .message_severity(
@@ -418,7 +382,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
 
     Ok(InternalContext {
         out_of_date: false,
-        entry,
+        _entry: entry,
         instance,
         surface,
         surface_loader,
@@ -466,11 +430,7 @@ fn create_swapchain_image_views(
                     layer_count: 1,
                 })
                 .image(image);
-            unsafe {
-                device
-                    .create_image_view(&create_info, None)
-                    .expect("Cant create image view")
-            }
+            unsafe { device.create_image_view(&create_info, None).expect("Cant create image view") }
         })
         .collect()
 }
@@ -494,9 +454,7 @@ fn create_framebuffers(
                 .layers(1);
 
             unsafe {
-                device
-                    .create_framebuffer(&create_info, None)
-                    .expect("Cant create framebuffer")
+                device.create_framebuffer(&create_info, None).expect("Cant create framebuffer")
             }
         })
         .collect()
@@ -508,6 +466,27 @@ fn resize_swapchain(
     width: u32,
     height: u32,
 ) {
+    if width == 0 || height == 0 {
+        utils::error("Expected size is zero");
+        return;
+    }
+    // TODO: Кидается ошибкой, если не вызывать get_surface_capabilites()
+    // Почему??
+    let surface_capabilities = unsafe {
+        context
+            .surface_loader
+            .get_physical_device_surface_capabilities(context.physical_device, context.surface)
+            .expect("Failed to get surface capabilities")
+    };
+    if width < surface_capabilities.min_image_extent.width
+        || height < surface_capabilities.min_image_extent.height
+        || width > surface_capabilities.max_image_extent.width
+        || height > surface_capabilities.max_image_extent.height
+    {
+        utils::error("Expected size is outside of bounds, provided by surface");
+        return;
+    }
+
     unsafe {
         context.device.device_wait_idle().expect("Wait idle error");
     }
@@ -526,25 +505,10 @@ fn resize_swapchain(
         }
     }
     unsafe {
-        context
-            .swapchain_loader
-            .destroy_swapchain(context.swapchain, None);
+        context.swapchain_loader.destroy_swapchain(context.swapchain, None);
     }
 
     // CREATION
-    // TODO: Кидается ошибкой, если не вызывать get_surface_capabilites()
-    // Почему??
-    let surface_capabilities = unsafe {
-        context
-            .surface_loader
-            .get_physical_device_surface_capabilities(context.physical_device, context.surface)
-            .expect("Failed to get surface capabilities")
-    };
-    utils::trace(format!(
-        "Surface size {}x{}",
-        surface_capabilities.min_image_extent.width, surface_capabilities.min_image_extent.height
-    ));
-
     context.surface_resolution = vk::Extent2D { width, height };
     let create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(context.surface)
@@ -588,38 +552,26 @@ fn resize_swapchain(
     }
 
     utils::trace(format!(
-        "Resized to {}x{}",
+        "Swapchain resized: {}x{}",
         context.surface_resolution.width, context.surface_resolution.height
     ));
 }
 
 unsafe fn destroy_context(context: &mut InternalContext) {
     context.device.device_wait_idle().expect("Wait idle error");
-    context
-        .device
-        .destroy_semaphore(context.rendering_complete_semaphore, None);
-    context
-        .device
-        .destroy_semaphore(context.presentation_complete_semaphore, None);
+    context.device.destroy_semaphore(context.rendering_complete_semaphore, None);
+    context.device.destroy_semaphore(context.presentation_complete_semaphore, None);
     context.device.destroy_fence(context.reuse_fence, None);
     for image_view in context.swapchain_image_views.iter() {
         context.device.destroy_image_view(*image_view, None);
     }
-    context
-        .device
-        .destroy_command_pool(context.command_pool, None);
+    context.device.destroy_command_pool(context.command_pool, None);
 
-    context
-        .debug_utils_loader
-        .destroy_debug_utils_messenger(context.debug_messenger, None);
+    context.debug_utils_loader.destroy_debug_utils_messenger(context.debug_messenger, None);
 
-    context
-        .swapchain_loader
-        .destroy_swapchain(context.swapchain, None);
+    context.swapchain_loader.destroy_swapchain(context.swapchain, None);
     context.device.destroy_device(None);
-    context
-        .surface_loader
-        .destroy_surface(context.surface, None);
+    context.surface_loader.destroy_surface(context.surface, None);
     context.instance.destroy_instance(None);
 }
 
@@ -632,9 +584,7 @@ unsafe fn destroy_pass(context: &InternalContext, pass: &mut Pass) {
 
 fn get_validation_support(entry: &ash::Entry) -> bool {
     let layer_properties = unsafe {
-        entry
-            .enumerate_instance_layer_properties()
-            .expect("Enumerate layer properties error")
+        entry.enumerate_instance_layer_properties().expect("Enumerate layer properties error")
     };
     layer_properties.iter().any(|l| {
         if let Ok(name) = l.layer_name_as_c_str() {
@@ -676,12 +626,12 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
-fn create_pass(internal: &mut InternalContext) -> Pass {
+fn create_pass(internal: &mut InternalContext, pass_config: &PassConfiguration) -> Pass {
     let attachments = [vk::AttachmentDescription {
         format: internal.surface_format.format,
         samples: vk::SampleCountFlags::TYPE_1,
         load_op: vk::AttachmentLoadOp::CLEAR,
-        store_op: vk::AttachmentStoreOp::DONT_CARE,
+        store_op: vk::AttachmentStoreOp::STORE,
         final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
         ..Default::default()
     }];
@@ -706,10 +656,7 @@ fn create_pass(internal: &mut InternalContext) -> Pass {
         .subpasses(&subpasses)
         .dependencies(&subpass_deps);
     let raw = unsafe {
-        internal
-            .device
-            .create_render_pass(&create_info, None)
-            .expect("Cant create render pass")
+        internal.device.create_render_pass(&create_info, None).expect("Cant create render pass")
     };
 
     let framebuffers = create_framebuffers(
@@ -723,7 +670,7 @@ fn create_pass(internal: &mut InternalContext) -> Pass {
     Pass {
         raw,
         clear_value: vk::ClearValue {
-            color: vk::ClearColorValue { float32: [0.0, 0.0, 1.0, 1.0] },
+            color: vk::ClearColorValue { float32: pass_config.clear_color },
         },
         framebuffers,
     }
@@ -751,9 +698,8 @@ unsafe fn pick_physical_device(
     surface_loader: &surface::Instance,
     surface: vk::SurfaceKHR,
 ) -> (vk::PhysicalDevice, u32) {
-    let all_devices = instance
-        .enumerate_physical_devices()
-        .expect("Enumerate physical devices error");
+    let all_devices =
+        instance.enumerate_physical_devices().expect("Enumerate physical devices error");
     all_devices
         .iter()
         .find_map(|device| {
@@ -785,10 +731,7 @@ fn get_layers(validation: bool) -> Vec<*const c_char> {
 }
 
 fn get_required_extensions(validation: bool) -> Vec<*const c_char> {
-    let mut extensions = vec![
-        khr::surface::NAME.as_ptr(),
-        khr::win32_surface::NAME.as_ptr(),
-    ];
+    let mut extensions = vec![surface::NAME.as_ptr(), win32_surface::NAME.as_ptr()];
     if validation {
         extensions.push(debug_utils::NAME.as_ptr())
     }
@@ -797,13 +740,8 @@ fn get_required_extensions(validation: bool) -> Vec<*const c_char> {
 }
 
 fn create_surface(entry: &ash::Entry, instance: &ash::Instance, window: &Window) -> vk::SurfaceKHR {
-    let create_info = vk::Win32SurfaceCreateInfoKHR::default()
-        .hwnd(window.hwnd())
-        .hinstance(window.hinstance());
-    let surface_fn = khr::win32_surface::Instance::new(entry, instance);
-    unsafe {
-        surface_fn
-            .create_win32_surface(&create_info, None)
-            .expect("Surface create error")
-    }
+    let create_info =
+        vk::Win32SurfaceCreateInfoKHR::default().hwnd(window.hwnd()).hinstance(window.hinstance());
+    let surface_fn = win32_surface::Instance::new(entry, instance);
+    unsafe { surface_fn.create_win32_surface(&create_info, None).expect("Surface create error") }
 }

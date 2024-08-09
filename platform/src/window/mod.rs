@@ -112,7 +112,6 @@ pub fn update_window(window: &mut Window) {
 
 // PRIVATE FUNCTIONS ===========================================================================
 fn create_window(name: &str, size: PhysicalSize, internal: &mut WindowInternal) {
-    utils::trace(format!("Create {:?}", name));
     unsafe {
         internal.hinstance = GetModuleHandleW(std::ptr::null());
 
@@ -137,6 +136,7 @@ fn create_window(name: &str, size: PhysicalSize, internal: &mut WindowInternal) 
         );
         internal.initialized = true;
     }
+    utils::trace(format!("Window {:?} created", name));
 }
 
 fn get_events_with_timeout(internal: &mut WindowInternal, timeout_ms: u64) {
@@ -171,12 +171,7 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
             match message {
                 WM_SIZE => {
                     let size = PhysicalSize::from_lparam(lparam);
-                    let mut rect: RECT = RECT {
-                        left: 0,
-                        top: 0,
-                        right: 0,
-                        bottom: 0,
-                    };
+                    let mut rect: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                     let result = GetWindowRect(hwnd, &mut rect);
                     assert_eq!(result, 1);
                     let outer_size = PhysicalSize::new(
@@ -191,63 +186,45 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
                 WM_KEYDOWN => {
                     let v_key = wparam as VIRTUAL_KEY;
                     let scancode = MapVirtualKeyExW(v_key as u32, MAPVK_VK_TO_VSC_EX, kb_layout);
-                    internal.events.push(WindowEvent::Key {
-                        pressed: true,
-                        key: scancode_to_key(scancode),
-                    });
+                    internal
+                        .events
+                        .push(WindowEvent::Key { pressed: true, key: scancode_to_key(scancode) });
                 }
                 WM_KEYUP => {
                     let v_key = wparam as VIRTUAL_KEY;
                     let scancode = MapVirtualKeyExW(v_key as u32, MAPVK_VK_TO_VSC_EX, kb_layout);
-                    internal.events.push(WindowEvent::Key {
-                        pressed: false,
-                        key: scancode_to_key(scancode),
-                    });
+                    internal
+                        .events
+                        .push(WindowEvent::Key { pressed: false, key: scancode_to_key(scancode) });
                 }
                 WM_LBUTTONDOWN => {
                     internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Button {
-                            pressed: true,
-                            button: MouseButton::Left,
-                        },
+                        event: MouseEvent::Button { pressed: true, button: MouseButton::Left },
                     });
                 }
                 WM_LBUTTONUP => {
                     internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Button {
-                            pressed: false,
-                            button: MouseButton::Left,
-                        },
+                        event: MouseEvent::Button { pressed: false, button: MouseButton::Left },
                     });
                 }
                 WM_RBUTTONDOWN => {
                     internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Button {
-                            pressed: true,
-                            button: MouseButton::Right,
-                        },
+                        event: MouseEvent::Button { pressed: true, button: MouseButton::Right },
                     });
                 }
                 WM_RBUTTONUP => {
                     internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Button {
-                            pressed: false,
-                            button: MouseButton::Right,
-                        },
+                        event: MouseEvent::Button { pressed: false, button: MouseButton::Right },
                     });
                 }
                 WM_MOUSEMOVE => {
                     let x = get_x_lparam(lparam as _);
                     let y = get_y_lparam(lparam as _);
-                    internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Move { x, y },
-                    });
+                    internal.events.push(WindowEvent::Mouse { event: MouseEvent::Move { x, y } });
                     result = 0;
                 }
                 WM_MOUSEWHEEL => {
-                    internal.events.push(WindowEvent::Mouse {
-                        event: MouseEvent::Wheel,
-                    });
+                    internal.events.push(WindowEvent::Mouse { event: MouseEvent::Wheel });
                     result = 0;
                 }
                 WM_CLOSE => {
