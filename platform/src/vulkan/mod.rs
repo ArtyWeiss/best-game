@@ -9,8 +9,10 @@ use crate::utils;
 use crate::window::Window;
 use crate::window::WindowEvent;
 
-use constants::VALIDATION_NAME;
+use instance::create_instance;
+
 mod constants;
+mod instance;
 
 pub struct VulkanContext {
     pub width: u32,
@@ -224,32 +226,7 @@ fn create_context(window: &Window, validation: bool) -> Result<InternalContext, 
     if window.hwnd() == 0 || window.hinstance() == 0 {
         return Err(VulkanError::WindowNotInitialized);
     }
-    let entry = unsafe { ash::Entry::load().expect("Vulkan not supported") };
-
-    let validation_support = get_validation_support(&entry);
-    if !validation_support && validation {
-        utils::error("Validation requested but not present");
-        return Err(VulkanError::ValidationNotPresent);
-    }
-
-    let instance = unsafe {
-        let engine_name = CString::new("Best Engine").unwrap();
-        let app_info = vk::ApplicationInfo::default()
-            .api_version(vk::make_api_version(0, 1, 1, 0))
-            .engine_name(&engine_name)
-            .engine_version(1)
-            .application_version(1);
-        let layers = get_layers(validation);
-        let extensions = get_required_extensions(validation);
-
-        let create_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&extensions)
-            .enabled_layer_names(&layers)
-            .flags(vk::InstanceCreateFlags::default());
-
-        entry.create_instance(&create_info, None).expect("Instance create error")
-    };
+    let (entry, instance) = unsafe { create_instance(validation)? };
 
     let surface = create_surface(&entry, &instance, window);
     let surface_loader = surface::Instance::new(&entry, &instance);
@@ -582,19 +559,6 @@ unsafe fn destroy_pass(context: &InternalContext, pass: &mut Pass) {
     context.device.destroy_render_pass(pass.raw, None);
 }
 
-fn get_validation_support(entry: &ash::Entry) -> bool {
-    let layer_properties = unsafe {
-        entry.enumerate_instance_layer_properties().expect("Enumerate layer properties error")
-    };
-    layer_properties.iter().any(|l| {
-        if let Ok(name) = l.layer_name_as_c_str() {
-            name == VALIDATION_NAME
-        } else {
-            false
-        }
-    })
-}
-
 #[allow(unused)]
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -720,23 +684,6 @@ unsafe fn pick_physical_device(
                 })
         })
         .expect("No suitable physical device")
-}
-
-fn get_layers(validation: bool) -> Vec<*const c_char> {
-    if validation {
-        vec![VALIDATION_NAME.as_ptr()]
-    } else {
-        vec![]
-    }
-}
-
-fn get_required_extensions(validation: bool) -> Vec<*const c_char> {
-    let mut extensions = vec![surface::NAME.as_ptr(), win32_surface::NAME.as_ptr()];
-    if validation {
-        extensions.push(debug_utils::NAME.as_ptr())
-    }
-
-    extensions
 }
 
 fn create_surface(entry: &ash::Entry, instance: &ash::Instance, window: &Window) -> vk::SurfaceKHR {
