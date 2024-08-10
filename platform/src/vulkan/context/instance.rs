@@ -2,8 +2,7 @@ use std::ffi::{c_char, CString};
 
 use ash::{ext::debug_utils, khr::*, vk};
 
-use super::VulkanError;
-use crate::{utils, vulkan::constants::VALIDATION_NAME};
+use crate::{utils, vulkan::constants::VALIDATION_NAME, vulkan::VulkanError};
 
 pub unsafe fn create_instance(
     validation: bool,
