@@ -71,7 +71,7 @@ pub fn begin_pass(context: &InternalContext, pass: &Pass, present_index: u32) {
             .render_area(context.surface_resolution.into())
             .framebuffer(pass.framebuffers[present_index as usize]);
         context.device.cmd_begin_render_pass(
-            context.command_buffer,
+            context.frames[context.current_frame].command_buffer,
             &begin_info,
             vk::SubpassContents::INLINE,
         );
@@ -80,7 +80,7 @@ pub fn begin_pass(context: &InternalContext, pass: &Pass, present_index: u32) {
 
 pub fn end_pass(context: &InternalContext) {
     unsafe {
-        context.device.cmd_end_render_pass(context.command_buffer);
+        context.device.cmd_end_render_pass(context.frames[context.current_frame].command_buffer);
     }
 }
 

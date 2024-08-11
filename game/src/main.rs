@@ -8,6 +8,9 @@ fn main() {
         update_window(&mut window);
         update_context(&mut vulkan_context, &window);
         update_pass(&mut vulkan_context);
-        draw_frame(&mut vulkan_context);
+
+        begin_frame(&mut vulkan_context);
+        draw_pass(&mut vulkan_context);
+        end_frame(&mut vulkan_context);
     }
 }

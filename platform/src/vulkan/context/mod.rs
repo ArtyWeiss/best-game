@@ -1,8 +1,8 @@
 use ash::{ext::debug_utils, khr::*, vk};
 use std::{borrow::Cow, ffi::CStr};
 
+use super::{constants::FRAMES_IN_FLIGHT, create_framebuffers, Pass, VulkanError};
 use crate::{utils, window::Window};
-use super::{create_framebuffers, Pass, VulkanError};
 
 use instance::*;
 pub mod instance;
@@ -22,20 +22,25 @@ pub struct InternalContext {
     pub device: ash::Device,
     pub physical_device: vk::PhysicalDevice,
     pub present_queue: vk::Queue,
+    pub command_pool: vk::CommandPool,
 
     pub swapchain_loader: swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
-
-    pub command_pool: vk::CommandPool,
-    pub command_buffer: vk::CommandBuffer,
-    pub reuse_fence: vk::Fence,
-
     pub swapchain_image_views: Vec<vk::ImageView>,
-    pub rendering_complete_semaphore: vk::Semaphore,
-    pub presentation_complete_semaphore: vk::Semaphore,
+
+    pub current_frame: usize,
+    pub frames: [Frame; FRAMES_IN_FLIGHT],
+    pub present_index: Option<u32>,
 
     pub debug_utils_loader: debug_utils::Instance,
     pub debug_messenger: vk::DebugUtilsMessengerEXT,
+}
+
+pub struct Frame {
+    pub command_buffer: vk::CommandBuffer,
+    pub reuse_fence: vk::Fence,
+    pub rendering_complete_semaphore: vk::Semaphore,
+    pub presentation_complete_semaphore: vk::Semaphore,
 }
 
 pub fn create_context(window: &Window, validation: bool) -> Result<InternalContext, VulkanError> {
@@ -132,27 +137,40 @@ pub fn create_context(window: &Window, validation: bool) -> Result<InternalConte
     let command_pool = unsafe {
         device.create_command_pool(&create_info, None).expect("Create command pool failed")
     };
-    let allocate_info =
-        vk::CommandBufferAllocateInfo::default().command_pool(command_pool).command_buffer_count(1);
-    let command_buffer = unsafe {
-        device.allocate_command_buffers(&allocate_info).expect("Cant allocate command buffer")[0]
+
+    let present_images = unsafe {
+        swapchain_loader.get_swapchain_images(swapchain).expect("Failed to get swapchain images")
     };
-
-    let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-    let reuse_fence =
-        unsafe { device.create_fence(&create_info, None).expect("Failed to create fence") };
-
-    let present_images =
-        unsafe { swapchain_loader.get_swapchain_images(swapchain).expect("No images") };
-
     let swapchain_image_views =
         create_swapchain_image_views(&device, &present_images, surface_format.format);
 
-    let create_info = vk::SemaphoreCreateInfo::default();
-    let rendering_complete_semaphore =
-        unsafe { device.create_semaphore(&create_info, None).expect("Cant create semaphore") };
-    let presentation_complete_semaphore =
-        unsafe { device.create_semaphore(&create_info, None).expect("Cant create semaphore") };
+    let command_buffer_allocate_info =
+        vk::CommandBufferAllocateInfo::default().command_pool(command_pool).command_buffer_count(1);
+    let fence_create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+    let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+
+    let frames = std::array::from_fn(|_| {
+        let command_buffer = unsafe {
+            device
+                .allocate_command_buffers(&command_buffer_allocate_info)
+                .expect("Cant allocate command buffer")[0]
+        };
+        let reuse_fence = unsafe {
+            device.create_fence(&fence_create_info, None).expect("Failed to create fence")
+        };
+        let rendering_complete_semaphore = unsafe {
+            device.create_semaphore(&semaphore_create_info, None).expect("Cant create semaphore")
+        };
+        let presentation_complete_semaphore = unsafe {
+            device.create_semaphore(&semaphore_create_info, None).expect("Cant create semaphore")
+        };
+        Frame {
+            command_buffer,
+            reuse_fence,
+            rendering_complete_semaphore,
+            presentation_complete_semaphore,
+        }
+    });
 
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
         .message_severity(
@@ -185,24 +203,25 @@ pub fn create_context(window: &Window, validation: bool) -> Result<InternalConte
         swapchain_loader,
         swapchain,
         command_pool,
-        command_buffer,
-        reuse_fence,
         swapchain_image_views,
-        rendering_complete_semaphore,
-        presentation_complete_semaphore,
         surface_format,
         surface_resolution: image_extent,
         present_mode,
         debug_utils_loader,
         debug_messenger,
+        current_frame: 0,
+        present_index: None,
+        frames,
     })
 }
 
 pub unsafe fn destroy_context(context: &mut InternalContext) {
     context.device.device_wait_idle().expect("Wait idle error");
-    context.device.destroy_semaphore(context.rendering_complete_semaphore, None);
-    context.device.destroy_semaphore(context.presentation_complete_semaphore, None);
-    context.device.destroy_fence(context.reuse_fence, None);
+    for f in context.frames.iter() {
+        context.device.destroy_semaphore(f.rendering_complete_semaphore, None);
+        context.device.destroy_semaphore(f.presentation_complete_semaphore, None);
+        context.device.destroy_fence(f.reuse_fence, None);
+    }
     for image_view in context.swapchain_image_views.iter() {
         context.device.destroy_image_view(*image_view, None);
     }
