@@ -34,7 +34,7 @@ pub fn update_context(context: &mut VulkanContext, window: &Window) {
     if let Some(internal) = context.internal.as_mut() {
         if window.internal.destroyed {
             context.internal = None;
-        } else if window.events.contains(&WindowEvent::Resize) {
+        } else if window.events.contains(&WindowEvent::Resize) || internal.out_of_date {
             resize_swapchain(
                 internal,
                 context.pass.as_mut(),
@@ -65,7 +65,6 @@ pub fn draw_frame(context: &mut VulkanContext) {
     if let (Some(internal), Some(pass)) = (context.internal.as_mut(), context.pass.as_mut()) {
         // START FRAME
         if internal.out_of_date {
-            utils::error("Swapchain outdated");
             return;
         }
 

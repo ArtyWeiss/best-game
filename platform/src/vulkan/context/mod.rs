@@ -223,7 +223,6 @@ pub fn resize_swapchain(
     height: u32,
 ) {
     if width == 0 || height == 0 {
-        utils::error("Expected size is zero");
         return;
     }
     // TODO: Кидается ошибкой, если не вызывать get_surface_capabilites()
@@ -306,6 +305,7 @@ pub fn resize_swapchain(
             context.surface_resolution.height,
         );
     }
+    context.out_of_date = false;
 
     utils::trace(format!(
         "Swapchain resized: {}x{}",
