@@ -84,7 +84,7 @@ pub fn end_pass(context: &InternalContext) {
     }
 }
 
-pub fn destroy_pass(context: &InternalContext, pass: &mut Pass) {
+pub fn destroy_pass(pass: &mut Pass, context: &InternalContext) {
     unsafe {
         for fb in pass.framebuffers.iter() {
             context.device.destroy_framebuffer(*fb, None);

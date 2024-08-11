@@ -3,20 +3,24 @@ use ash::vk;
 use crate::utils;
 use crate::window::{Window, WindowEvent};
 
+pub use resources::PipelineConfig;
+
+use constants::*;
 use context::*;
 use pass::*;
-
-use self::constants::FRAMES_IN_FLIGHT;
+use resources::*;
 
 mod constants;
 mod context;
 mod pass;
+mod resources;
 
 pub struct VulkanContext {
     pub width: u32,
     pub height: u32,
     pub validation: bool,
     pub(crate) internal: Option<InternalContext>,
+    pub(crate) resources: Option<Resources>,
     pub(crate) pass: Option<Pass>,
 }
 
@@ -24,11 +28,12 @@ pub struct VulkanContext {
 pub enum VulkanError {
     WindowNotInitialized,
     ValidationNotPresent,
+    ResourceCreationFailed,
 }
 
 impl VulkanContext {
     pub fn new(width: u32, height: u32, validation: bool) -> Self {
-        Self { width, height, validation, internal: None, pass: None }
+        Self { width, height, validation, internal: None, resources: None, pass: None }
     }
 }
 
@@ -46,7 +51,10 @@ pub fn update_context(context: &mut VulkanContext, window: &Window) {
         }
     } else if window.internal.initialized {
         match create_context(window, context.validation) {
-            Ok(internal) => context.internal = Some(internal),
+            Ok(internal) => {
+                context.internal = Some(internal);
+                context.resources = Some(create_resources());
+            }
             Err(e) => utils::error(format!("{:?}", e)),
         }
     }
@@ -162,19 +170,32 @@ pub fn end_frame(context: &mut VulkanContext) {
     }
 }
 
+pub fn create_pipeline(
+    context: &mut VulkanContext,
+    config: PipelineConfig,
+) -> Result<u32, VulkanError> {
+    if let (Some(internal), Some(resources)) =
+        (context.internal.as_mut(), context.resources.as_mut())
+    {
+        resources.create_pipeline(internal, config)
+    } else {
+        Err(VulkanError::ResourceCreationFailed)
+    }
+}
+
 impl Drop for VulkanContext {
     fn drop(&mut self) {
-        match (self.internal.take(), self.pass.take()) {
-            (Some(mut internal), Some(mut pass)) => unsafe {
+        unsafe {
+            if let Some(mut internal) = self.internal.take() {
                 internal.device.device_wait_idle().expect("Wait idle error");
-                destroy_pass(&mut internal, &mut pass);
+                if let Some(mut resources) = self.resources.take() {
+                    destroy_resources(&mut resources, &internal);
+                }
+                if let Some(mut pass) = self.pass.take() {
+                    destroy_pass(&mut pass, &internal);
+                }
                 destroy_context(&mut internal);
-            },
-            (Some(mut internal), None) => unsafe {
-                internal.device.device_wait_idle().expect("Wait idle error");
-                destroy_context(&mut internal);
-            },
-            (_, _) => {}
+            }
         }
     }
 }
