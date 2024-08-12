@@ -12,8 +12,8 @@ fn main() {
 
         if pipeline.is_none() {
             let pipeline_config = PipelineConfig {
-                vertext_shader_source: include_bytes!("../assets/shaders/test.vert.spv"),
-                fragment_shader_source: include_bytes!("../assets/shaders/test.frag.spv"),
+                vertext_shader_source: include_bytes!("../assets/compiled/test.vert.spv"),
+                fragment_shader_source: include_bytes!("../assets/compiled/test.frag.spv"),
             };
             pipeline = create_pipeline(&mut vulkan_context, pipeline_config).ok();
             utils::trace(format!("Pipeline created: {:?}", pipeline));
